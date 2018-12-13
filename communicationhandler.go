@@ -115,6 +115,7 @@ func (sc *SessionContext) receiveLoop() {
 			// TODO: break/return on specific errors - i.e. connection reset
 			continue
 		}
+		fmt.Printf("%s received a packet of type %T\n", sc.ID, pktIntf)
 		switch pkt := pktIntf.(type) {
 		case messagePacket:
 			// Acknowledge message packet
@@ -167,6 +168,7 @@ func (sc *SessionContext) sendLoop() {
 	for {
 		select {
 		case msg := <-sc.sendMsgChan.Out:
+			fmt.Printf("%s dispatches a message of type %T\n", sc.ID, msg)
 			sc.dispatchMessage(sc.connection, msg)
 		// Read from echo channel and dispatch (happens every 3 min)
 		case echoPkt := <-echoPktChan:

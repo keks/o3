@@ -1,6 +1,10 @@
 package o3
 
-import "time"
+import (
+	"bytes"
+	"encoding/binary"
+	"time"
+)
 
 type pktType uint32
 
@@ -35,6 +39,24 @@ type messagePacket struct {
 	Nonce      nonce
 	Ciphertext []byte
 	Plaintext  []byte
+}
+
+func (pkt messagePacket) MarshalBinary() ([]byte, error) {
+	var buf bytes.Buffer
+
+	binary.Write(&buf, binary.LittleEndian, pkt.PktType)
+	binary.Write(&buf, binary.LittleEndian, pkt.Sender)
+	binary.Write(&buf, binary.LittleEndian, pkt.Recipient)
+	binary.Write(&buf, binary.LittleEndian, pkt.ID)
+	binary.Write(&buf, binary.LittleEndian, pkt.Time)
+	binary.Write(&buf, binary.LittleEndian, pkt.Flags)
+	// The three following bytes are unused
+	binary.Write(&buf, binary.LittleEndian, []byte{0, 0, 0})
+	binary.Write(&buf, binary.LittleEndian, pkt.PubNick)
+	binary.Write(&buf, binary.LittleEndian, pkt.Nonce)
+	binary.Write(&buf, binary.LittleEndian, pkt.Ciphertext)
+
+	return buf.Bytes(), nil
 }
 
 type ackPacket struct {

@@ -11,6 +11,7 @@ package o3
 import (
 	"bytes"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"io"
 
@@ -24,17 +25,16 @@ func dispatcherPanicHandler(context string, i interface{}) error {
 	return fmt.Errorf("%s: unknown dispatch error occurred: %#v", context, i)
 }
 
-func writeHelper(wr io.Writer, buf *bytes.Buffer) {
+func writeHelper(wr io.Writer, buf *bytes.Buffer) error {
 	i, err := wr.Write(buf.Bytes())
 	if i != buf.Len() {
-		panic("not enough bytes were transmitted")
+		return errors.New("not enough bytes were transmitted")
 	}
-	if err != nil {
-		panic(err)
-	}
+
+	return err
 }
 
-func (sc *SessionContext) dispatchClientHello(wr io.Writer) {
+func (sc *SessionContext) dispatchClientHello(wr io.Writer) error {
 	defer func() {
 		if r := recover(); r != nil {
 			panic(dispatcherPanicHandler("client hello", r))
@@ -45,19 +45,13 @@ func (sc *SessionContext) dispatchClientHello(wr io.Writer) {
 	ch.ClientSPK = sc.clientSPK
 	ch.NoncePrefix = sc.clientNonce.prefix()
 
-	buf := serializeClientHelloPkt(ch)
-	writeHelper(wr, buf)
+	return binary.Write(wr, binary.LittleEndian, ch)
 }
 
 //not necessary on the client side
 func (sc *SessionContext) dispatchServerHello(wr io.Writer) {}
 
-func (sc *SessionContext) dispatchAuthMsg(wr io.Writer) {
-	defer func() {
-		if r := recover(); r != nil {
-			panic(dispatcherPanicHandler("authentication packet", r))
-		}
-	}()
+func (sc *SessionContext) dispatchAuthMsg(wr io.Writer) error {
 	var app authPacketPayload
 	var ap authPacket
 
@@ -69,11 +63,15 @@ func (sc *SessionContext) dispatchAuthMsg(wr io.Writer) {
 	//create payload ciphertext
 	ct := box.Seal(nil, sc.clientSPK[:], app.RandomNonce.bytes(), &sc.serverLPK, &sc.ID.LSK)
 	if len(ct) != 48 {
-		panic("error encrypting client short-term public key")
+		return errors.New("error encrypting client short-term public key")
 	}
 	copy(app.Ciphertext[:], ct[0:48])
 
-	appBuf := serializeAuthPktPayload(app)
+	var appBuf bytes.Buffer
+	err := binary.Write(&appBuf, binary.LittleEndian, app)
+	if err != nil {
+		return err
+	}
 
 	//create auth packet ciphertext
 	sc.clientNonce.setCounter(1)
@@ -83,43 +81,53 @@ func (sc *SessionContext) dispatchAuthMsg(wr io.Writer) {
 	}
 	copy(ap.Ciphertext[:], apct[0:144])
 
-	buf := serializeAuthPkt(ap)
-	writeHelper(wr, buf)
+	return binary.Write(wr, binary.LittleEndian, ap)
 }
 
-func (sc *SessionContext) dispatchAckMsg(wr io.Writer, mp messagePacket) {
+func (sc *SessionContext) dispatchAckMsg(wr io.Writer, mp messagePacket) error {
 	ackP := ackPacket{
 		PktType:  clientAck,
 		SenderID: mp.Sender,
 		MsgID:    mp.ID}
-	serializedAckPkt := serializeAckPkt(ackP)
+
+	var serializedAckPkt bytes.Buffer
+	err := binary.Write(&serializedAckPkt, binary.LittleEndian, ackP)
+	if err != nil {
+		return err
+	}
 
 	sc.clientNonce.increaseCounter()
 	ackpCipherText := box.Seal(nil, serializedAckPkt.Bytes(), sc.clientNonce.bytes(), &sc.serverSPK, &sc.clientSSK)
 
-	buf := new(bytes.Buffer)
-	binary.Write(buf, binary.LittleEndian, uint16(len(ackpCipherText)))
-	binary.Write(buf, binary.LittleEndian, ackpCipherText)
+	err = binary.Write(wr, binary.LittleEndian, uint16(len(ackpCipherText)))
+	if err != nil {
+		return err
+	}
 
-	writeHelper(wr, buf)
+	return binary.Write(wr, binary.LittleEndian, ackpCipherText)
 }
 
-func (sc *SessionContext) dispatchEchoMsg(wr io.Writer, oldEchoPacket echoPacket) {
+func (sc *SessionContext) dispatchEchoMsg(wr io.Writer, oldEchoPacket echoPacket) error {
 	ep := echoPacket{
 		Counter: oldEchoPacket.Counter + 1}
-	serializedEchoPkt := serializeEchoPkt(ep)
+	var serializedEchoPkt bytes.Buffer
+	err := binary.Write(&serializedEchoPkt, binary.LittleEndian, ep)
+	if err != nil {
+		return err
+	}
 
 	sc.clientNonce.increaseCounter()
 	epCipherText := box.Seal(nil, serializedEchoPkt.Bytes(), sc.clientNonce.bytes(), &sc.serverSPK, &sc.clientSSK)
 
-	buf := new(bytes.Buffer)
-	binary.Write(buf, binary.LittleEndian, uint16(len(epCipherText)))
-	binary.Write(buf, binary.LittleEndian, epCipherText)
+	err = binary.Write(wr, binary.LittleEndian, uint16(len(epCipherText)))
+	if err != nil {
+		return err
+	}
 
-	writeHelper(wr, buf)
+	return binary.Write(wr, binary.LittleEndian, epCipherText)
 }
 
-func (sc *SessionContext) dispatchMessage(wr io.Writer, m Message) {
+func (sc *SessionContext) dispatchMessage(wr io.Writer, m Message) error {
 	mh := m.header()
 
 	randNonce := newRandomNonce()
@@ -131,11 +139,17 @@ func (sc *SessionContext) dispatchMessage(wr io.Writer, m Message) {
 
 		recipient, err = tr.GetContactByID(mh.recipient)
 		if err != nil {
-			panic("Recipient's PublicKey could not be found!")
+			return errors.New("Recipient's PublicKey could not be found!")
 		}
 		sc.ID.Contacts.Add(recipient)
 	}
-	msgCipherText := box.Seal(nil, m.Serialize(), randNonce.bytes(), &recipient.LPK, &sc.ID.LSK)
+
+	msgData, err := m.MarshalBinary()
+	if err != nil {
+		return err
+	}
+
+	msgCipherText := box.Seal(nil, msgData, randNonce.bytes(), &recipient.LPK, &sc.ID.LSK)
 
 	messagePkt := messagePacket{
 		PktType:    sendingMsg,
@@ -149,14 +163,19 @@ func (sc *SessionContext) dispatchMessage(wr io.Writer, m Message) {
 		Ciphertext: msgCipherText,
 	}
 
-	serializedMsgPkt := serializeMsgPkt(messagePkt)
+	var serializedMsgPkt bytes.Buffer
+	err = binary.Write(&serializedMsgPkt, binary.LittleEndian, messagePkt)
+	if err != nil {
+		return err
+	}
 
 	sc.clientNonce.increaseCounter()
 	serializedMsgPktCipherText := box.Seal(nil, serializedMsgPkt.Bytes(), sc.clientNonce.bytes(), &sc.serverSPK, &sc.clientSSK)
 
-	buf := new(bytes.Buffer)
-	binary.Write(buf, binary.LittleEndian, uint16(len(serializedMsgPktCipherText)))
-	binary.Write(buf, binary.LittleEndian, serializedMsgPktCipherText)
+	err = binary.Write(wr, binary.LittleEndian, uint16(len(serializedMsgPktCipherText)))
+	if err != nil {
+		return err
+	}
 
-	writeHelper(wr, buf)
+	return binary.Write(wr, binary.LittleEndian, serializedMsgPktCipherText)
 }
